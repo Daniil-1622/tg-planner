@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from config import CHAT_ID, DAY_SUMMARY_ALL_DONE, DAY_SUMMARY_INCOMPLETE, MOTIVATION_ALL_DONE, PAR_SCHEDULE
+from config import CHAT_IDS, DAY_SUMMARY_ALL_DONE, DAY_SUMMARY_INCOMPLETE, MOTIVATION_ALL_DONE, PAR_SCHEDULE
 from database import Goal, GoalJournalEntry, ScheduleChoice, SessionLocal, Task
 from keyboards import (
     cancel_only_keyboard,
@@ -734,73 +734,82 @@ def register_handlers(application) -> None:
 
 
 async def job_send_pair_question(bot) -> None:
-    """22:00 МСК — вопрос о паре."""
-    if not CHAT_ID:
-        logger.warning("CHAT_ID не задан — пропуск вечернего опроса")
+    """22:00 МСК — вопрос о паре (каждому чату из CHAT_IDS)."""
+    if not CHAT_IDS:
+        logger.warning("CHAT_ID / CHAT_IDS не заданы — пропуск вечернего опроса")
         return
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text="📚 К какой паре завтра?",
-        reply_markup=pair_selection_keyboard(),
-    )
+    for chat_id in CHAT_IDS:
+        await bot.send_message(
+            chat_id=chat_id,
+            text="📚 К какой паре завтра?",
+            reply_markup=pair_selection_keyboard(),
+        )
 
 
 async def job_day_summary(bot) -> None:
-    """23:30 МСК — итог дня по задачам."""
-    if not CHAT_ID:
+    """23:30 МСК — итог дня по задачам (отдельно для каждого chat_id)."""
+    if not CHAT_IDS:
         return
     today = moscow_today()
-    with SessionLocal() as db:
-        tasks = list(
-            db.execute(select(Task).where(Task.chat_id == CHAT_ID, Task.task_date == today)).scalars().all()
-        )
-    if not tasks:
-        return
-    undone = [t for t in tasks if not t.done]
-    if not undone:
+    for chat_id in CHAT_IDS:
+        with SessionLocal() as db:
+            tasks = list(
+                db.execute(
+                    select(Task).where(Task.chat_id == chat_id, Task.task_date == today)
+                ).scalars().all()
+            )
+        if not tasks:
+            continue
+        undone = [t for t in tasks if not t.done]
+        if not undone:
+            await bot.send_message(
+                chat_id=chat_id,
+                text=DAY_SUMMARY_ALL_DONE,
+                reply_markup=main_menu_keyboard(),
+            )
+            continue
+        lines = "\n".join(f"⬜ {t.text}" for t in undone)
         await bot.send_message(
-            chat_id=CHAT_ID,
-            text=DAY_SUMMARY_ALL_DONE,
+            chat_id=chat_id,
+            text=f"{DAY_SUMMARY_INCOMPLETE}\n\nНевыполнено:\n{lines}",
             reply_markup=main_menu_keyboard(),
         )
-        return
-    lines = "\n".join(f"⬜ {t.text}" for t in undone)
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text=f"{DAY_SUMMARY_INCOMPLETE}\n\nНевыполнено:\n{lines}",
-        reply_markup=main_menu_keyboard(),
-    )
 
 
 async def job_weekly_goals_checkup(bot, application) -> None:
-    """Пятница 20:00 МСК — чекап целей."""
-    if not CHAT_ID:
+    """Пятница 20:00 МСК — чекап целей по каждому чату."""
+    if not CHAT_IDS:
         return
-    with SessionLocal() as db:
-        goals = list(
-            db.execute(
-                select(Goal).where(Goal.chat_id == CHAT_ID, Goal.completed.is_(False)).order_by(Goal.id)
-            ).scalars().all()
+    pending = application.bot_data.setdefault(BOT_DATA_PENDING_WEEKLY, set()) if application else None
+
+    for chat_id in CHAT_IDS:
+        with SessionLocal() as db:
+            goals = list(
+                db.execute(
+                    select(Goal)
+                    .where(Goal.chat_id == chat_id, Goal.completed.is_(False))
+                    .order_by(Goal.id)
+                ).scalars().all()
+            )
+        if not goals:
+            await bot.send_message(
+                chat_id=chat_id,
+                text="📊 Еженедельный чекап: активных целей нет.",
+                reply_markup=main_menu_keyboard(),
+            )
+            continue
+        parts = []
+        for g in goals:
+            parts.append(f"• {g.title}")
+        text = (
+            "📊 Еженедельный чекап целей\n\n"
+            + "\n".join(parts)
+            + "\n\nЧто сделал на этой неделе для достижения своих целей? Напиши ответ одним сообщением."
         )
-    if not goals:
         await bot.send_message(
-            chat_id=CHAT_ID,
-            text="📊 Еженедельный чекап: активных целей нет.",
-            reply_markup=main_menu_keyboard(),
+            chat_id=chat_id,
+            text=text,
+            reply_markup=weekly_pending_keyboard(),
         )
-        return
-    parts = []
-    for g in goals:
-        parts.append(f"• {g.title}")
-    text = (
-        "📊 Еженедельный чекап целей\n\n"
-        + "\n".join(parts)
-        + "\n\nЧто сделал на этой неделе для достижения своих целей? Напиши ответ одним сообщением."
-    )
-    await bot.send_message(
-        chat_id=CHAT_ID,
-        text=text,
-        reply_markup=weekly_pending_keyboard(),
-    )
-    if application:
-        application.bot_data.setdefault(BOT_DATA_PENDING_WEEKLY, set()).add(CHAT_ID)
+        if pending is not None:
+            pending.add(chat_id)
