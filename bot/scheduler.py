@@ -1,0 +1,54 @@
+"""
+Планировщик APScheduler: 22:00 и 23:30 ежедневно, пятница 20:00.
+Часовой пояс — Europe/Moscow.
+"""
+import logging
+from zoneinfo import ZoneInfo
+
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+logger = logging.getLogger(__name__)
+
+TZ = ZoneInfo("Europe/Moscow")
+# Ключ для хранения экземпляра планировщика в application.bot_data
+SCHEDULER_KEY = "apscheduler"
+
+
+def setup_scheduler(application) -> AsyncIOScheduler:
+    """Регистрирует и запускает cron-задачи."""
+    from handlers import job_day_summary, job_send_pair_question, job_weekly_goals_checkup
+
+    scheduler = AsyncIOScheduler(timezone=TZ)
+
+    async def evening_pair() -> None:
+        await job_send_pair_question(application.bot)
+
+    async def night_summary() -> None:
+        await job_day_summary(application.bot)
+
+    async def friday_weekly() -> None:
+        await job_weekly_goals_checkup(application.bot, application)
+
+    scheduler.add_job(evening_pair, "cron", hour=22, minute=0, id="evening_pair", replace_existing=True)
+    scheduler.add_job(night_summary, "cron", hour=23, minute=30, id="night_summary", replace_existing=True)
+    scheduler.add_job(
+        friday_weekly,
+        "cron",
+        day_of_week="fri",
+        hour=20,
+        minute=0,
+        id="friday_weekly",
+        replace_existing=True,
+    )
+    scheduler.start()
+    application.bot_data[SCHEDULER_KEY] = scheduler
+    logger.info("APScheduler запущен (Europe/Moscow): 22:00 пары, 23:30 итог дня, пт 20:00 цели")
+    return scheduler
+
+
+def shutdown_scheduler(application) -> None:
+    """Останавливает планировщик при выключении бота."""
+    sched = application.bot_data.get(SCHEDULER_KEY)
+    if sched:
+        sched.shutdown(wait=False)
+        logger.info("APScheduler остановлен")

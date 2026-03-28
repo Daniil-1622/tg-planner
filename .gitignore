@@ -1,0 +1,17 @@
+# Секреты и локальные данные
+bot/.env
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+.venv/
+venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
