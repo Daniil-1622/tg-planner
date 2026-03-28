@@ -1,9 +1,37 @@
 """
-Inline-клавиатуры для бота.
+Inline- и reply-клавиатуры для бота.
 """
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
 from database import Goal, Task
+
+
+def main_menu_keyboard() -> ReplyKeyboardMarkup:
+    """Главное меню — без ввода команд."""
+    return ReplyKeyboardMarkup(
+        [
+            [KeyboardButton("📝 Задачи"), KeyboardButton("➕ Задачи сегодня")],
+            [KeyboardButton("🎯 Цели"), KeyboardButton("➕ Новая цель")],
+            [KeyboardButton("📚 Расписание завтра"), KeyboardButton("ℹ️ Помощь")],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def cancel_only_keyboard() -> ReplyKeyboardMarkup:
+    """Во время ввода списка задач или диалога цели."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("❌ Отмена")]],
+        resize_keyboard=True,
+    )
+
+
+def weekly_pending_keyboard() -> ReplyKeyboardMarkup:
+    """Пока ждём ответ на еженедельный чекап по целям."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton("⏭ Пропустить чекап")]],
+        resize_keyboard=True,
+    )
 
 
 def pair_selection_keyboard() -> InlineKeyboardMarkup:
@@ -33,10 +61,11 @@ def tasks_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup:
 
 
 def goals_keyboard(goals: list[Goal]) -> InlineKeyboardMarkup:
-    """Кнопки «Выполнено» и «Удалить» для каждой активной цели."""
+    """Кнопки «Журнал», «Выполнено» и «Удалить» для каждой активной цели."""
     rows = []
     for g in goals:
-        short = g.title[:25] + ("…" if len(g.title) > 25 else "")
+        short = g.title[:28] + ("…" if len(g.title) > 28 else "")
+        rows.append([InlineKeyboardButton(f"📖 {short}", callback_data=f"goal:log:{g.id}")])
         rows.append(
             [
                 InlineKeyboardButton(f"✅ {short}", callback_data=f"goal:done:{g.id}"),
