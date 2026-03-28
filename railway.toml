@@ -1,0 +1,6 @@
+# https://docs.railway.com/guides/build-configuration
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "cd bot && python main.py"
