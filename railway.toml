@@ -3,4 +3,5 @@
 builder = "NIXPACKS"
 
 [deploy]
-startCommand = "cd bot && python main.py"
+# При Root Directory = bot в настройках Railway
+startCommand = "python main.py"

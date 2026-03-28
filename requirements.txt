@@ -1,2 +1,0 @@
-# Зависимости проекта (единый список — см. bot/requirements.txt)
--r bot/requirements.txt
