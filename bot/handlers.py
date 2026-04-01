@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 from telegram import Update
 from telegram.ext import (
@@ -138,7 +138,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat_id = update.effective_chat.id
     text = (
         "Кнопки меню дублируют основные действия.\n"
-        "Команды на всякий случай: /tasks /add /goals /addgoal /schedule /goallog название /cancel"
+        "Команды на всякий случай: /tasks /add /goals /addgoal /schedule /goallog название /stats /cancel"
     )
     await update.message.reply_text(text, reply_markup=reply_keyboard_for_chat(context, chat_id))
 
@@ -428,6 +428,7 @@ async def on_task_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             await q.answer("Задача не найдена", show_alert=True)
             return
         task.done = not task.done
+        task.completed_at = datetime.utcnow() if task.done else None
         db.commit()
         tasks = list(
             db.execute(
@@ -501,6 +502,7 @@ async def on_goal_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return
         if action == "done":
             goal.completed = True
+            goal.closed_at = datetime.utcnow()
             tip = "Отмечено выполненной"
         elif action == "del":
             db.delete(goal)
@@ -722,6 +724,7 @@ def register_handlers(application) -> None:
     application.add_handler(CommandHandler("goals", cmd_goals))
     application.add_handler(CommandHandler("schedule", cmd_schedule))
     application.add_handler(CommandHandler("goallog", cmd_goallog))
+    application.add_handler(CommandHandler("stats", cmd_stats))
     application.add_handler(build_conversation_addgoal())
     application.add_handler(CallbackQueryHandler(on_pair_callback, pattern=r"^pair:"))
     application.add_handler(CallbackQueryHandler(on_task_toggle, pattern=r"^task:toggle:"))
@@ -739,7 +742,8 @@ async def job_send_pair_question(bot) -> None:
         logger.warning("CHAT_ID / CHAT_IDS не заданы — пропуск вечернего опроса")
         return
     for chat_id in CHAT_IDS:
-        await bot.send_message(
+        await _send_notification(
+            bot,
             chat_id=chat_id,
             text="📚 К какой паре завтра?",
             reply_markup=pair_selection_keyboard(),
@@ -762,14 +766,11 @@ async def job_day_summary(bot) -> None:
             continue
         undone = [t for t in tasks if not t.done]
         if not undone:
-            await bot.send_message(
-                chat_id=chat_id,
-                text=DAY_SUMMARY_ALL_DONE,
-                reply_markup=main_menu_keyboard(),
-            )
+            await _send_notification(bot, chat_id=chat_id, text=DAY_SUMMARY_ALL_DONE, reply_markup=main_menu_keyboard())
             continue
         lines = "\n".join(f"⬜ {t.text}" for t in undone)
-        await bot.send_message(
+        await _send_notification(
+            bot,
             chat_id=chat_id,
             text=f"{DAY_SUMMARY_INCOMPLETE}\n\nНевыполнено:\n{lines}",
             reply_markup=main_menu_keyboard(),
@@ -792,7 +793,8 @@ async def job_weekly_goals_checkup(bot, application) -> None:
                 ).scalars().all()
             )
         if not goals:
-            await bot.send_message(
+            await _send_notification(
+                bot,
                 chat_id=chat_id,
                 text="📊 Еженедельный чекап: активных целей нет.",
                 reply_markup=main_menu_keyboard(),
@@ -806,10 +808,119 @@ async def job_weekly_goals_checkup(bot, application) -> None:
             + "\n".join(parts)
             + "\n\nЧто сделал на этой неделе для достижения своих целей? Напиши ответ одним сообщением."
         )
-        await bot.send_message(
+        await _send_notification(
+            bot,
             chat_id=chat_id,
             text=text,
             reply_markup=weekly_pending_keyboard(),
         )
         if pending is not None:
             pending.add(chat_id)
+
+
+def _week_bounds_msk() -> tuple[datetime, datetime]:
+    """Границы текущей недели МСК: пн 00:00:00 .. вс 23:59:59.999999 (UTC-naive)."""
+    now_msk = datetime.now(MOSCOW)
+    week_start_date = now_msk.date() - timedelta(days=now_msk.weekday())
+    week_start_msk = datetime.combine(week_start_date, datetime.min.time(), tzinfo=MOSCOW)
+    week_end_msk = week_start_msk + timedelta(days=7) - timedelta(microseconds=1)
+    # В БД храним naive UTC (utcnow), поэтому приводим к UTC и убираем tzinfo.
+    start_utc_naive = week_start_msk.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    end_utc_naive = week_end_msk.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    return start_utc_naive, end_utc_naive
+
+
+def _build_weekly_stats_text(chat_id: int) -> str:
+    """Собирает недельную статистику по задачам/целям для одного чата."""
+    start_dt, end_dt = _week_bounds_msk()
+    week_title = f"{(start_dt + timedelta(hours=3)).strftime('%d.%m')}–{(end_dt + timedelta(hours=3)).strftime('%d.%m')}"
+
+    with SessionLocal() as db:
+        created_tasks = db.execute(
+            select(func.count(Task.id)).where(
+                Task.chat_id == chat_id,
+                Task.created_at >= start_dt,
+                Task.created_at <= end_dt,
+            )
+        ).scalar_one()
+        completed_tasks = db.execute(
+            select(func.count(Task.id)).where(
+                Task.chat_id == chat_id,
+                Task.completed_at.is_not(None),
+                Task.completed_at >= start_dt,
+                Task.completed_at <= end_dt,
+            )
+        ).scalar_one()
+        closed_goals = db.execute(
+            select(func.count(Goal.id)).where(
+                Goal.chat_id == chat_id,
+                Goal.closed_at.is_not(None),
+                Goal.closed_at >= start_dt,
+                Goal.closed_at <= end_dt,
+            )
+        ).scalar_one()
+
+        # Активные дни и лучший день считаем по датам completed_at.
+        done_rows = db.execute(
+            select(Task.completed_at).where(
+                Task.chat_id == chat_id,
+                Task.completed_at.is_not(None),
+                Task.completed_at >= start_dt,
+                Task.completed_at <= end_dt,
+            )
+        ).all()
+
+    day_map: dict[date, int] = {}
+    for (completed_at,) in done_rows:
+        dt_msk = completed_at.replace(tzinfo=ZoneInfo("UTC")).astimezone(MOSCOW)
+        d = dt_msk.date()
+        day_map[d] = day_map.get(d, 0) + 1
+
+    active_days = len(day_map)
+    if day_map:
+        best_date, best_count = max(day_map.items(), key=lambda x: x[1])
+        weekdays = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье"]
+        best_day = f"{weekdays[best_date.weekday()]} ({best_count} задач)"
+    else:
+        best_day = "—"
+
+    percent = (completed_tasks / created_tasks * 100.0) if created_tasks else 0.0
+    if percent >= 80:
+        motivation = "Отличная неделя! Темп высокий — так держать 💪"
+    elif percent >= 40:
+        motivation = "Неплохо! Есть прогресс, но есть куда расти 🚀"
+    else:
+        motivation = "Неделя была сложной, но новая уже рядом. Начни с малого и набери ритм 🌱"
+
+    return (
+        f"📈 Недельный отчёт ({week_title})\n\n"
+        f"✅ Задачи: выполнено {completed_tasks} из {created_tasks}\n"
+        f"🎯 Закрыто целей: {closed_goals}\n"
+        f"🔥 Активных дней: {active_days} из 7\n"
+        f"🏆 Лучший день: {best_day}\n\n"
+        f"{motivation}"
+    )
+
+
+async def _send_notification(bot, chat_id: int, text: str, reply_markup=None) -> None:
+    """Единый хелпер отправки плановых уведомлений."""
+    await bot.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+
+
+async def send_weekly_stats(bot) -> None:
+    """Еженедельный отчёт по статистике (воскресенье 20:00 МСК)."""
+    if not CHAT_IDS:
+        logger.warning("CHAT_ID / CHAT_IDS не заданы — пропуск недельной статистики")
+        return
+    for chat_id in CHAT_IDS:
+        text = _build_weekly_stats_text(chat_id)
+        await _send_notification(bot, chat_id=chat_id, text=text, reply_markup=main_menu_keyboard())
+
+
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ручной запуск недельного отчёта для текущего чата."""
+    if not update.message:
+        return
+    chat_id = update.effective_chat.id
+    text = _build_weekly_stats_text(chat_id)
+    await update.message.reply_text(text, reply_markup=reply_keyboard_for_chat(context, chat_id))

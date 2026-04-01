@@ -4,7 +4,7 @@
 from datetime import date, datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, String, Text, create_engine
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, String, Text, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship, sessionmaker
 
 from config import DB_PATH
@@ -25,6 +25,7 @@ class Task(Base):
     text: Mapped[str] = mapped_column(String(500), nullable=False)
     done: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
 
 class Goal(Base):
@@ -39,6 +40,7 @@ class Goal(Base):
     motivation: Mapped[str] = mapped_column(Text, nullable=False)
     completed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     journal_entries: Mapped[list["GoalJournalEntry"]] = relationship(
         back_populates="goal", cascade="all, delete-orphan"
@@ -76,3 +78,28 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, expi
 def init_db() -> None:
     """Создаёт таблицы, если их ещё нет."""
     Base.metadata.create_all(bind=engine)
+    _ensure_compat_columns()
+
+
+def _ensure_compat_columns() -> None:
+    """
+    Добавляет новые колонки в уже существующие SQLite-таблицы.
+    Нужно для мягкой миграции старых баз без Alembic.
+    """
+    insp = inspect(engine)
+    task_cols = {c["name"] for c in insp.get_columns("tasks")}
+    goal_cols = {c["name"] for c in insp.get_columns("goals")}
+
+    with engine.begin() as conn:
+        if "completed_at" not in task_cols:
+            try:
+                conn.execute(text("ALTER TABLE tasks ADD COLUMN completed_at DATETIME"))
+            except Exception:
+                # Колонка могла уже появиться параллельно/в предыдущем запуске.
+                pass
+        if "closed_at" not in goal_cols:
+            try:
+                conn.execute(text("ALTER TABLE goals ADD COLUMN closed_at DATETIME"))
+            except Exception:
+                # Колонка могла уже появиться параллельно/в предыдущем запуске.
+                pass
